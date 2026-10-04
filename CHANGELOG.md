@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0 (unreleased)
+## 1.2.0 (4 October 2026)
 
 Addresses the findings of an independent code audit of v1.1.0 (4 October 2026). No change in
 behaviour on the Surface Laptop Studio 2: the bytes sent to the keyboard are identical.
