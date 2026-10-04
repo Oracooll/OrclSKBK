@@ -17,8 +17,10 @@ issues.
 1. Download the latest zip from [Releases](https://github.com/Oracooll/SurfaceKeyboardBacklightKeeper/releases)
    and unpack it.
 2. Either just run `SurfaceKeyboardBacklightKeeper.exe`, or run `install.ps1` (right-click,
-   *Run with PowerShell*) to copy it to `%LOCALAPPDATA%\SurfaceKeyboardBacklightKeeper` and start
-   it at sign-in. `uninstall.ps1` reverses that.
+   *Run with PowerShell*) to copy it to `%LOCALAPPDATA%\SurfaceKeyboardBacklightKeeper`, start
+   it at sign-in and add a Start menu shortcut. `uninstall.ps1` reverses that. It deletes only
+   what the app creates, keeps folders that contain anything else, and lists whatever it could
+   not remove.
 3. A small keyboard icon appears in the tray: yellow = active, grey = paused or no device.
 
 The binary is not code-signed, so Windows SmartScreen warns on first run. Choose *More info* →
@@ -26,8 +28,27 @@ The binary is not code-signed, so Windows SmartScreen warns on first run. Choose
 single source file with the C# compiler that ships in every Windows installation. No Visual Studio
 or .NET SDK required. The release notes carry the SHA-256 of each zip.
 
-It needs no admin rights, no driver and no network access, and writes settings only under
-`HKCU\Software\SurfaceBacklightKeeper`.
+## Privacy, permissions and files
+
+It needs no admin rights and no driver, makes no network connections, and does not read
+keystrokes: it opens only the HID *Keyboard Backlight* collection, never the keyboard's input
+collection. Everything it writes is per-user:
+
+| Where | What | When |
+| --- | --- | --- |
+| `HKCU\Software\SurfaceBacklightKeeper` | Settings | When you change a menu option, and on first run |
+| `HKCU\...\CurrentVersion\Run`, value `SurfaceBacklightKeeper` | Start at sign-in | Only when *Start with Windows* is ticked or `install.ps1` runs |
+| `%LOCALAPPDATA%\SurfaceBacklightKeeper\keeper.log` | Log: start-up, device path and IDs, brightness sent, errors | Only while *Write log file* is ticked |
+| same file | Crash report (exception details) | Always, if the app crashes |
+
+The log rotates at about 512 KB and keeps one previous file (`keeper.old.log`). The app reads the
+brightness Windows stores under `HKLM\SOFTWARE\Microsoft\Lighting\Backlight\State` but never
+writes to `HKLM`.
+
+**Scope:** it acts on every keyboard that exposes the standard HID Keyboard Backlight interface,
+not only Surface keyboards. Each keyboard follows its own brightness as stored by Windows, and a
+fixed level from the menu applies to all of them. With today's hardware that is, in practice,
+the built-in Surface keyboard.
 
 ## Using it
 
@@ -71,10 +92,17 @@ stays on.
 * **Two keep-alive methods.** The default simply repeats the current level (no flicker). If the
   light still times out on your model, switch to *Tiny dip and restore on every refresh*, which
   writes one step lower and immediately back (6 → 5 → 6 nits within 20 ms).
-* Uses `WriteFile` on the HID collection: the Surface HID mini-driver does not implement
-  `HidD_SetOutputReport` (it returns error 50, `ERROR_NOT_SUPPORTED`). The report layout is parsed
-  from the HID descriptor at runtime, nothing is hard-coded, so firmware updates that keep the
-  standard interface should keep working.
+* **Reports are built from the keyboard's own descriptor.** The Windows HID parser
+  (`HidP_SetUsageValue`, `HidP_GetUsageValue`, `HidP_GetUsageValueArray`) encodes and decodes
+  every report from the device's descriptor, so report IDs (including none), field positions and
+  sizes are not assumed. Writes go through `WriteFile`, because the Surface HID mini-driver does not
+  implement `HidD_SetOutputReport` (error 50, `ERROR_NOT_SUPPORTED`); that call remains only as a
+  fallback for other keyboards. Short writes count as failures.
+* **Device work runs on a background thread.** A slow or stuck driver cannot freeze the tray
+  menu or delay lock and display handling. If a device call hangs for more than 3 s, the app
+  cancels it, shows "Keyboard not responding" and re-detects the keyboard.
+* **Several keyboards are tracked separately**: brightness changes, the "turned off with its key"
+  state and failure counts are kept per keyboard.
 
 ## Files
 
@@ -86,13 +114,14 @@ stays on.
 | `install.ps1`, `uninstall.ps1` | Per-user install to Local AppData with start-at-sign-in, and removal. |
 | `release.ps1` | Builds, zips, hashes and publishes a GitHub release (maintainer use). |
 | `.github/workflows/build.yml` | CI build on every push. |
-
-Log file, when enabled from the menu: `%LOCALAPPDATA%\SurfaceBacklightKeeper\keeper.log`.
+| `CHANGELOG.md` | What changed in each version. |
 
 ## Caveats
 
-* Verified on the Surface Laptop Studio 2 only. The keyboard has no readable "light is on" state,
-  so the app cannot tell whether the light is currently on; it just keeps re-arming the timer.
+* Verified on the Surface Laptop Studio 2 only. Other models, several keyboards at once, and
+  lock, resume and firmware-update behaviour on other hardware need checking by their owners. The
+  keyboard has no readable "light is on" state, so the app cannot tell whether the light is
+  currently on; it just keeps re-arming the timer.
 * The display off → on transition relights the keyboard (the embedded controller is told about
   display state by the Surface driver), but a screen blink was judged not worth the complication:
   on Modern Standby machines Windows suspends desktop apps the moment the screen goes off, so the

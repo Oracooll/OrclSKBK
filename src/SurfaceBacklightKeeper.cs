@@ -12,10 +12,18 @@
 // off, no HID write of any kind turns it back on. Only a physical key press, a trackpad touch
 // or the display turning back on does. So: touch the trackpad once, and this app keeps it on.
 //
-// Build (no SDK needed, uses the .NET Framework compiler that ships with Windows):
+// Design notes:
+//  * Reports are encoded and decoded by the Windows HID parser (HidP_SetUsageValue and friends) using the
+//    device's own preparsed descriptor data, so report IDs (including 0), field positions and sizes come
+//    from the descriptor instead of being assumed.
+//  * All device I/O runs on one background thread. The UI thread only decides when a refresh is due and
+//    shows the results, so a stalled driver cannot freeze the tray menu; a watchdog cancels a stuck call.
+//  * Per-keyboard state ("the user turned this one off with its key", failure counts) is kept per device.
+//
+// Build (no SDK needed, uses the .NET Framework compiler that ships with Windows): run build.ps1, or
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+
 //     /out:SurfaceKeyboardBacklightKeeper.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll
-//     /win32manifest:app.manifest SurfaceBacklightKeeper.cs   (or just run build.ps1)
+//     /win32manifest:app.manifest SurfaceBacklightKeeper.cs
 //
 // Written in C# 5 syntax on purpose so the in-box compiler can build it.
 
@@ -37,8 +45,8 @@ using Microsoft.Win32.SafeHandles;
 [assembly: System.Reflection.AssemblyDescription("Keeps the Surface keyboard backlight from timing out. Made by Claude, prompted by Oracooll.")]
 [assembly: System.Reflection.AssemblyCompany("Made by Claude, prompted by Oracooll")]
 [assembly: System.Reflection.AssemblyCopyright("MIT License. Copyright (c) 2026 Oracooll. Made by Claude.")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
 
 namespace SurfaceBacklightKeeper
 {
@@ -54,6 +62,7 @@ namespace SurfaceBacklightKeeper
         public const int HIDP_STATUS_SUCCESS = 0x00110000;
         public const uint CR_SUCCESS = 0;
         public const uint CM_GET_DEVICE_INTERFACE_LIST_PRESENT = 0;
+        public const uint THREAD_TERMINATE = 0x0001;   // access right required by CancelSynchronousIo
         public static readonly Guid GUID_DEVINTERFACE_HID = new Guid("4D1E55B2-F16F-11CF-88CB-001111000030");
         public static readonly Guid GUID_CONSOLE_DISPLAY_STATE = new Guid("6FE69556-704A-47A0-8F24-C28D936FDA47");
         public const int WM_POWERBROADCAST = 0x0218;
@@ -62,29 +71,39 @@ namespace SurfaceBacklightKeeper
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr tmpl);
-
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool WriteFile(SafeFileHandle h, byte[] buf, uint len, out uint written, IntPtr overlapped);
+        [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+        [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
+        [DllImport("kernel32.dll", SetLastError = true)] public static extern bool CancelSynchronousIo(IntPtr thread);
+        [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
 
         [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
         public static extern uint CM_Get_Device_Interface_List_Size(out uint size, ref Guid classGuid, string deviceId, uint flags);
-
         [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
         public static extern uint CM_Get_Device_Interface_List(ref Guid classGuid, string deviceId, char[] buffer, uint bufferLen, uint flags);
 
         [DllImport("hid.dll", SetLastError = true)] public static extern bool HidD_GetPreparsedData(SafeFileHandle h, out IntPtr pp);
         [DllImport("hid.dll")] public static extern bool HidD_FreePreparsedData(IntPtr pp);
-        [DllImport("hid.dll")] public static extern int HidP_GetCaps(IntPtr pp, out HIDP_CAPS caps);
-        [DllImport("hid.dll")] public static extern int HidP_GetValueCaps(int reportType, [Out] HIDP_VALUE_CAPS[] caps, ref ushort len, IntPtr pp);
         [DllImport("hid.dll", SetLastError = true)] public static extern bool HidD_GetFeature(SafeFileHandle h, byte[] buf, int len);
         [DllImport("hid.dll", SetLastError = true)] public static extern bool HidD_SetOutputReport(SafeFileHandle h, byte[] buf, int len);
         [DllImport("hid.dll", SetLastError = true)] public static extern bool HidD_GetAttributes(SafeFileHandle h, ref HIDD_ATTRIBUTES a);
         [DllImport("hid.dll", SetLastError = true)] public static extern bool HidD_GetProductString(SafeFileHandle h, byte[] buf, int len);
+        [DllImport("hid.dll")] public static extern int HidP_GetCaps(IntPtr pp, out HIDP_CAPS caps);
+        [DllImport("hid.dll")] public static extern int HidP_GetValueCaps(int reportType, [Out] HIDP_VALUE_CAPS[] caps, ref ushort len, IntPtr pp);
+        [DllImport("hid.dll")] public static extern int HidP_InitializeReportForID(int reportType, byte reportId, IntPtr pp, byte[] report, uint reportLength);
+        [DllImport("hid.dll")] public static extern int HidP_SetUsageValue(int reportType, ushort usagePage, ushort linkCollection, ushort usage, uint value, IntPtr pp, byte[] report, uint reportLength);
+        [DllImport("hid.dll")] public static extern int HidP_GetUsageValue(int reportType, ushort usagePage, ushort linkCollection, ushort usage, out uint value, IntPtr pp, byte[] report, uint reportLength);
+        [DllImport("hid.dll")] public static extern int HidP_GetUsageValueArray(int reportType, ushort usagePage, ushort linkCollection, ushort usage, byte[] values, ushort valuesLength, IntPtr pp, byte[] report, uint reportLength);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr RegisterPowerSettingNotification(IntPtr hRecipient, ref Guid powerSettingGuid, uint flags);
         [DllImport("user32.dll")] public static extern bool UnregisterPowerSettingNotification(IntPtr handle);
         [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
+
+        [DllImport("wtsapi32.dll", SetLastError = true, EntryPoint = "WTSQuerySessionInformationW")]
+        static extern bool WTSQuerySessionInformation(IntPtr server, int sessionId, int infoClass, out IntPtr buffer, out int bytes);
+        [DllImport("wtsapi32.dll")] static extern void WTSFreeMemory(IntPtr memory);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct HIDD_ATTRIBUTES { public uint Size; public ushort VendorID; public ushort ProductID; public ushort VersionNumber; }
@@ -101,7 +120,7 @@ namespace SurfaceBacklightKeeper
             public ushort NumberFeatureButtonCaps; public ushort NumberFeatureValueCaps; public ushort NumberFeatureDataIndices;
         }
 
-        // Explicit layout of HIDP_VALUE_CAPS (72 bytes); only the fields we use are declared.
+        // Explicit layout of HIDP_VALUE_CAPS (72 bytes); only the fields used here are declared.
         [StructLayout(LayoutKind.Explicit, Size = 72)]
         public struct HIDP_VALUE_CAPS
         {
@@ -136,9 +155,79 @@ namespace SurfaceBacklightKeeper
             }
             return result;
         }
+
+        /// <summary>
+        /// True if this session is locked or not the active one (for example disconnected by fast user switching),
+        /// false if it is active and unlocked, null if Windows could not say.
+        /// </summary>
+        public static bool? IsSessionLocked()
+        {
+            IntPtr buf; int bytes;
+            if (!WTSQuerySessionInformation(IntPtr.Zero, -1 /* current session */, 25 /* WTSSessionInfoEx */, out buf, out bytes) || buf == IntPtr.Zero) return null;
+            try
+            {
+                if (bytes < 20 || Marshal.ReadInt32(buf, 0) != 1) return null;   // WTSINFOEX.Level must be 1
+                // WTSINFOEX_LEVEL1_W sits in an 8-byte aligned union: SessionId at 8, SessionState at 12, SessionFlags at 16.
+                int state = Marshal.ReadInt32(buf, 12);   // WTS_CONNECTSTATE_CLASS, 0 = WTSActive
+                int flags = Marshal.ReadInt32(buf, 16);   // WTS_SESSIONSTATE_LOCK = 0, WTS_SESSIONSTATE_UNLOCK = 1
+                if (state != 0) return true;
+                if (flags == 0) return true;
+                if (flags == 1) return false;
+                return null;
+            }
+            finally { WTSFreeMemory(buf); }
+        }
+    }
+
+    // ------------------------------------------------------------------ Log file
+    /// <summary>
+    /// %LOCALAPPDATA%\SurfaceBacklightKeeper\keeper.log. Normal lines are written only while "Write log file" is ticked.
+    /// Crash reports are always written. Both go through the same rotation (one previous file kept, ~512 KB each).
+    /// </summary>
+    static class Logger
+    {
+        public static volatile bool Enabled;
+        static readonly object Sync = new object();
+        const long MaxBytes = 512 * 1024;
+
+        public static string Dir { get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SurfaceBacklightKeeper"); } }
+
+        public static void Write(string message) { if (Enabled) Append(message); }
+
+        public static void Crash(string what, Exception ex) { Append(what + ": " + (ex == null ? "(no details)" : ex.ToString())); }
+
+        static void Append(string message)
+        {
+            try
+            {
+                lock (Sync)
+                {
+                    Directory.CreateDirectory(Dir);
+                    string file = System.IO.Path.Combine(Dir, "keeper.log");
+                    if (File.Exists(file) && new FileInfo(file).Length > MaxBytes)
+                    {
+                        string old = System.IO.Path.Combine(Dir, "keeper.old.log");
+                        if (File.Exists(old)) File.Delete(old);
+                        File.Move(file, old);
+                    }
+                    File.AppendAllText(file, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + message + Environment.NewLine);
+                }
+            }
+            catch { }
+        }
     }
 
     // ------------------------------------------------------------------ Backlight HID device
+    /// <summary>Immutable description of a detected backlight, safe to hand to the UI thread.</summary>
+    sealed class DeviceInfo
+    {
+        public string Path, Name;
+        public ushort Vid, Pid;
+        public int LogicalMin, LogicalMax;
+        public int[] Suggestions;
+    }
+
+    /// <summary>One HID Keyboard Backlight collection. Used only from the device thread (or the self test).</summary>
     sealed class BacklightDevice : IDisposable
     {
         public const ushort UsagePageConsumer = 0x0C;
@@ -149,15 +238,26 @@ namespace SurfaceBacklightKeeper
         public string Path;
         public string Name = "keyboard backlight";
         public ushort Vid, Pid;
-        public byte SetLevelReportId;
-        public int OutputReportLength, FeatureReportLength;
         public int LogicalMin, LogicalMax;
-        public byte SuggestionReportId; public int SuggestionCount;
-        public byte InitialLevelReportId;
         public int[] Suggestions = new int[0];
+        public string LastReportHex = "";
+
+        int _outputLength, _featureLength;
+        byte _setLevelReportId; int _setLevelBits;
+        bool _hasSuggestions; byte _suggestionReportId; int _suggestionCount, _suggestionBits;
+        bool _hasInitialLevel; byte _initialLevelReportId; int _initialLevelBits;
+        IntPtr _pp = IntPtr.Zero;    // preparsed descriptor data, kept for the device's lifetime to encode and decode reports
         SafeFileHandle _h;
 
-        public bool IsOpen { get { return _h != null && !_h.IsInvalid && !_h.IsClosed; } }
+        public bool IsOpen { get { return _h != null && !_h.IsInvalid && !_h.IsClosed && _pp != IntPtr.Zero; } }
+
+        public DeviceInfo Snapshot()
+        {
+            var i = new DeviceInfo();
+            i.Path = Path; i.Name = Name; i.Vid = Vid; i.Pid = Pid;
+            i.LogicalMin = LogicalMin; i.LogicalMax = LogicalMax; i.Suggestions = (int[])Suggestions.Clone();
+            return i;
+        }
 
         public static List<BacklightDevice> FindAll(Action<string> log)
         {
@@ -173,123 +273,190 @@ namespace SurfaceBacklightKeeper
 
         static BacklightDevice TryOpen(string path, Action<string> log)
         {
-            // Cheap pre-filter: the interface path contains no usage info, so we must open each collection.
-            // Keyboard/mouse collections refuse user-mode opens; open with no access rights first to read caps.
-            var h = Native.CreateFile(path, 0, Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero);
-            if (h.IsInvalid) return null;
-            IntPtr pp = IntPtr.Zero;
+            // The interface path carries no usage information, so every HID collection is opened with no access
+            // rights (allowed even for keyboards and mice) just to read its capabilities.
+            var probe = Native.CreateFile(path, 0, Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero);
+            if (probe.IsInvalid) return null;
+            var d = new BacklightDevice();
+            bool keep = false;
             try
             {
-                if (!Native.HidD_GetPreparsedData(h, out pp)) return null;
+                if (!Native.HidD_GetPreparsedData(probe, out d._pp)) { d._pp = IntPtr.Zero; return null; }
                 Native.HIDP_CAPS caps;
-                if (Native.HidP_GetCaps(pp, out caps) != Native.HIDP_STATUS_SUCCESS) return null;
+                if (Native.HidP_GetCaps(d._pp, out caps) != Native.HIDP_STATUS_SUCCESS) return null;
                 if (caps.UsagePage != UsagePageConsumer || caps.Usage != UsageKeyboardBacklight) return null;
 
-                var d = new BacklightDevice();
                 d.Path = path;
-                d.OutputReportLength = caps.OutputReportByteLength;
-                d.FeatureReportLength = caps.FeatureReportByteLength;
+                d._outputLength = caps.OutputReportByteLength;
+                d._featureLength = caps.FeatureReportByteLength;
 
-                if (caps.NumberOutputValueCaps > 0)
+                bool hasSetLevel = false;
+                foreach (var vc in d.GetValueCaps(Native.HidP_Output, caps.NumberOutputValueCaps))
                 {
-                    var vc = new Native.HIDP_VALUE_CAPS[caps.NumberOutputValueCaps]; ushort n = caps.NumberOutputValueCaps;
-                    Native.HidP_GetValueCaps(Native.HidP_Output, vc, ref n, pp);
-                    for (int i = 0; i < n; i++)
-                        if (vc[i].UsagePage == UsagePageConsumer && vc[i].IsRange == 0 && vc[i].UsageMin == UsageSetLevel && vc[i].BitSize == 8)
-                        { d.SetLevelReportId = vc[i].ReportID; d.LogicalMin = vc[i].LogicalMin; d.LogicalMax = vc[i].LogicalMax; }
+                    if (vc.UsagePage != UsagePageConsumer || vc.IsRange != 0 || vc.UsageMin != UsageSetLevel) continue;
+                    if (vc.ReportCount != 1 || vc.BitSize < 1 || vc.BitSize > 31) continue;
+                    d._setLevelReportId = vc.ReportID; d._setLevelBits = vc.BitSize;
+                    d.LogicalMin = vc.LogicalMin; d.LogicalMax = vc.LogicalMax;
+                    hasSetLevel = true;
+                    break;
                 }
-                if (d.LogicalMax <= d.LogicalMin || d.OutputReportLength < 2)
+                if (!hasSetLevel || d.LogicalMax <= d.LogicalMin || d._outputLength < 1)
                 {
-                    log("Backlight collection at " + path + " has no usable Set Level output report; skipping.");
+                    log("Backlight collection without a usable Set Level output report, skipped: " + path);
                     return null;
                 }
-                if (caps.NumberFeatureValueCaps > 0)
+                foreach (var vc in d.GetValueCaps(Native.HidP_Feature, caps.NumberFeatureValueCaps))
                 {
-                    var vc = new Native.HIDP_VALUE_CAPS[caps.NumberFeatureValueCaps]; ushort n = caps.NumberFeatureValueCaps;
-                    Native.HidP_GetValueCaps(Native.HidP_Feature, vc, ref n, pp);
-                    for (int i = 0; i < n; i++)
-                    {
-                        if (vc[i].UsagePage != UsagePageConsumer || vc[i].IsRange != 0 || vc[i].BitSize != 8) continue;
-                        if (vc[i].UsageMin == UsageLevelSuggestion) { d.SuggestionReportId = vc[i].ReportID; d.SuggestionCount = vc[i].ReportCount; }
-                        else if (vc[i].UsageMin == UsageSetLevel) { d.InitialLevelReportId = vc[i].ReportID; }
-                    }
+                    if (vc.UsagePage != UsagePageConsumer || vc.IsRange != 0 || vc.BitSize < 1 || vc.BitSize > 31 || vc.ReportCount < 1) continue;
+                    if (vc.UsageMin == UsageLevelSuggestion && !d._hasSuggestions)
+                    { d._hasSuggestions = true; d._suggestionReportId = vc.ReportID; d._suggestionCount = vc.ReportCount; d._suggestionBits = vc.BitSize; }
+                    else if (vc.UsageMin == UsageSetLevel && vc.ReportCount == 1 && !d._hasInitialLevel)
+                    { d._hasInitialLevel = true; d._initialLevelReportId = vc.ReportID; d._initialLevelBits = vc.BitSize; }
                 }
-                h.Close();
+                probe.Close();
+
                 d._h = Native.CreateFile(path, Native.GENERIC_READ | Native.GENERIC_WRITE, Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero);
                 if (d._h.IsInvalid)
                     d._h = Native.CreateFile(path, Native.GENERIC_WRITE, Native.FILE_SHARE_READ | Native.FILE_SHARE_WRITE, IntPtr.Zero, Native.OPEN_EXISTING, 0, IntPtr.Zero);
                 if (d._h.IsInvalid)
                 {
-                    log("Found backlight collection but could not open it for writing (error " + Marshal.GetLastWin32Error() + "): " + path);
+                    log("Found a backlight collection but could not open it for writing (error " + Marshal.GetLastWin32Error() + "): " + path);
                     return null;
                 }
-                var attr = new Native.HIDD_ATTRIBUTES(); attr.Size = 12;
+                var attr = new Native.HIDD_ATTRIBUTES(); attr.Size = (uint)Marshal.SizeOf(typeof(Native.HIDD_ATTRIBUTES));
                 if (Native.HidD_GetAttributes(d._h, ref attr)) { d.Vid = attr.VendorID; d.Pid = attr.ProductID; }
-                var pbuf = new byte[256];
-                if (Native.HidD_GetProductString(d._h, pbuf, pbuf.Length))
-                {
-                    var s = Encoding.Unicode.GetString(pbuf); int z = s.IndexOf('\0'); if (z >= 0) s = s.Substring(0, z);
-                    // The Surface mini-driver returns a raw USB string descriptor (bLength, bDescriptorType=3) - strip that header.
-                    if (s.Length > 0 && (s[0] >> 8) == 3) s = s.Substring(1);
-                    s = s.Trim(); if (s.Length >= 8) d.Name = s; else if (attr.VendorID == 0x045E) d.Name = "Surface keyboard";
-                }
+                d.Name = ReadProductName(d._h, d.Vid);
                 d.ReadSuggestions();
-                log(string.Format("Backlight device: {0} VID={1:X4} PID={2:X4} setLevelReport={3} range={4}..{5} suggestions=[{6}] initialLevelReport={7} path={8}",
-                    d.Name, d.Vid, d.Pid, d.SetLevelReportId, d.LogicalMin, d.LogicalMax, string.Join(",", Array.ConvertAll(d.Suggestions, x => x.ToString())), d.InitialLevelReportId, path));
+                log(string.Format("Backlight device: {0} VID={1:X4} PID={2:X4} setLevelReport={3} ({4} bit) range={5}..{6} suggestions=[{7}] initialLevelReport={8} path={9}",
+                    d.Name, d.Vid, d.Pid, d._setLevelReportId, d._setLevelBits, d.LogicalMin, d.LogicalMax,
+                    string.Join(",", Array.ConvertAll(d.Suggestions, x => x.ToString())),
+                    d._hasInitialLevel ? d._initialLevelReportId.ToString() : "none", path));
+                keep = true;
                 return d;
             }
             finally
             {
-                if (pp != IntPtr.Zero) Native.HidD_FreePreparsedData(pp);
-                if (!h.IsClosed) h.Close();
+                if (!probe.IsClosed) probe.Close();
+                if (!keep) d.Dispose();
             }
+        }
+
+        static string ReadProductName(SafeFileHandle h, ushort vid)
+        {
+            var buf = new byte[256];
+            string s = "";
+            if (Native.HidD_GetProductString(h, buf, buf.Length))
+            {
+                s = Encoding.Unicode.GetString(buf);
+                int z = s.IndexOf('\0'); if (z >= 0) s = s.Substring(0, z);
+                // The Surface mini-driver returns a raw USB string descriptor (bLength, bDescriptorType=3): strip that header.
+                if (s.Length > 0 && (s[0] >> 8) == 3) s = s.Substring(1);
+                s = s.Trim();
+            }
+            if (s.Length >= 8) return s;
+            return vid == 0x045E ? "Surface keyboard" : "keyboard backlight";
+        }
+
+        Native.HIDP_VALUE_CAPS[] GetValueCaps(int reportType, ushort count)
+        {
+            if (count == 0) return new Native.HIDP_VALUE_CAPS[0];
+            var caps = new Native.HIDP_VALUE_CAPS[count];
+            ushort n = count;
+            if (Native.HidP_GetValueCaps(reportType, caps, ref n, _pp) != Native.HIDP_STATUS_SUCCESS) return new Native.HIDP_VALUE_CAPS[0];
+            if (n < caps.Length) Array.Resize(ref caps, n);
+            return caps;
+        }
+
+        static uint ToRaw(int value, int bits) { return (uint)value & ((1u << bits) - 1); }
+
+        int FromRaw(uint raw, int bits)
+        {
+            // Sign-extend only when the descriptor declares a signed range.
+            if (LogicalMin < 0 && (raw & (1u << (bits - 1))) != 0) return (int)(raw | ~((1u << bits) - 1));
+            return (int)raw;
+        }
+
+        static uint ExtractBits(byte[] data, int bitOffset, int bitCount)
+        {
+            uint v = 0;
+            for (int i = 0; i < bitCount; i++)
+            {
+                int bit = bitOffset + i;
+                if (((data[bit >> 3] >> (bit & 7)) & 1) != 0) v |= 1u << i;
+            }
+            return v;
+        }
+
+        byte[] GetFeatureReport(byte reportId)
+        {
+            if (!IsOpen || _featureLength < 1) return null;
+            // A Get Feature request only needs the report ID (0 when the descriptor has none) in byte 0; the device fills
+            // the rest. HidP_InitializeReportForID is not used here because it reports HIDP_STATUS_REPORT_DOES_NOT_EXIST
+            // for feature reports whose only field is declared Constant, as the Surface's initial-level report is.
+            var buf = new byte[_featureLength];
+            buf[0] = reportId;
+            if (!Native.HidD_GetFeature(_h, buf, buf.Length)) return null;
+            return buf;
         }
 
         void ReadSuggestions()
         {
-            if (SuggestionReportId == 0 || FeatureReportLength < 2) return;
-            var buf = new byte[FeatureReportLength]; buf[0] = SuggestionReportId;
-            if (!Native.HidD_GetFeature(_h, buf, buf.Length)) return;
-            var list = new List<int>();
-            for (int i = 0; i < SuggestionCount && 1 + i < buf.Length; i++)
+            if (!_hasSuggestions) return;
+            var report = GetFeatureReport(_suggestionReportId);
+            if (report == null) return;
+            var raw = new List<int>();
+            if (_suggestionCount == 1)
             {
-                int v = buf[1 + i];
-                if (v >= LogicalMin && v <= LogicalMax && !list.Contains(v)) list.Add(v);
+                uint v;
+                if (Native.HidP_GetUsageValue(Native.HidP_Feature, UsagePageConsumer, 0, UsageLevelSuggestion, out v, _pp, report, (uint)report.Length) == Native.HIDP_STATUS_SUCCESS)
+                    raw.Add(FromRaw(v, _suggestionBits));
             }
+            else
+            {
+                int bytes = (_suggestionCount * _suggestionBits + 7) / 8;
+                if (bytes > ushort.MaxValue) return;
+                var values = new byte[bytes];
+                if (Native.HidP_GetUsageValueArray(Native.HidP_Feature, UsagePageConsumer, 0, UsageLevelSuggestion, values, (ushort)bytes, _pp, report, (uint)report.Length) != Native.HIDP_STATUS_SUCCESS) return;
+                for (int i = 0; i < _suggestionCount; i++) raw.Add(FromRaw(ExtractBits(values, i * _suggestionBits, _suggestionBits), _suggestionBits));
+            }
+            var list = new List<int>();
+            foreach (int v in raw) if (v >= LogicalMin && v <= LogicalMax && !list.Contains(v)) list.Add(v);
             list.Sort();
             Suggestions = list.ToArray();
         }
 
-        /// <summary>Level the device itself reports (what the host last set). Null if unsupported/failed.</summary>
+        /// <summary>Level the keyboard reports as its initial/last level, if it implements that feature report.</summary>
         public int? ReadDeviceLevel()
         {
-            if (InitialLevelReportId == 0 || FeatureReportLength < 2 || !IsOpen) return null;
-            var buf = new byte[FeatureReportLength]; buf[0] = InitialLevelReportId;
-            if (!Native.HidD_GetFeature(_h, buf, buf.Length)) return null;
-            return buf[1];
+            if (!_hasInitialLevel) return null;
+            var report = GetFeatureReport(_initialLevelReportId);
+            if (report == null) return null;
+            uint v;
+            if (Native.HidP_GetUsageValue(Native.HidP_Feature, UsagePageConsumer, 0, UsageSetLevel, out v, _pp, report, (uint)report.Length) != Native.HIDP_STATUS_SUCCESS) return null;
+            int level = FromRaw(v, _initialLevelBits);
+            if (level < LogicalMin || level > LogicalMax) return null;
+            return level;
         }
 
-        /// <summary>
-        /// Sends the Set Level output report. The Surface HID mini-driver only implements the
-        /// IOCTL_HID_WRITE_REPORT path (WriteFile); HidD_SetOutputReport returns ERROR_NOT_SUPPORTED (50)
-        /// on it, so WriteFile is tried first and HidD_SetOutputReport is kept as a fallback for other keyboards.
-        /// </summary>
-        public bool SetLevel(int level, out int error)
+        /// <summary>Brightness Windows last applied to this device (HKLM Lighting state, readable by standard users).</summary>
+        public int? ReadWindowsLevel()
         {
-            error = 0;
-            if (!IsOpen) { error = -1; return false; }
-            if (level < LogicalMin) level = LogicalMin; if (level > LogicalMax) level = LogicalMax;
-            var buf = new byte[OutputReportLength]; buf[0] = SetLevelReportId; buf[1] = (byte)level;
-            uint written;
-            if (Native.WriteFile(_h, buf, (uint)buf.Length, out written, IntPtr.Zero)) return true;
-            int e1 = Marshal.GetLastWin32Error();
-            if (Native.HidD_SetOutputReport(_h, buf, buf.Length)) return true;
-            error = e1 != 0 ? e1 : Marshal.GetLastWin32Error();
-            return false;
+            try
+            {
+                using (var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
+                using (var k = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Lighting\Backlight\State\" + StateKeyName))
+                {
+                    if (k == null) return null;
+                    object v = k.GetValue("ManualBrightnessNits");
+                    if (v is int) return (int)v;
+                }
+            }
+            catch { }
+            return null;
         }
 
         /// <summary>Registry key name Windows uses to persist this device's manual brightness.</summary>
-        public string StateKeyName
+        string StateKeyName
         {
             get
             {
@@ -299,7 +466,272 @@ namespace SurfaceBacklightKeeper
             }
         }
 
-        public void Dispose() { if (_h != null && !_h.IsClosed) _h.Close(); }
+        /// <summary>Encodes a Set Level output report with the HID parser. Null, with a reason, if the descriptor rejects it.</summary>
+        public byte[] BuildSetLevelReport(int level, out string error)
+        {
+            error = "";
+            if (_pp == IntPtr.Zero) { error = "no descriptor data"; return null; }
+            if (level < LogicalMin) level = LogicalMin;
+            if (level > LogicalMax) level = LogicalMax;
+            var buf = new byte[_outputLength];
+            int st = Native.HidP_InitializeReportForID(Native.HidP_Output, _setLevelReportId, _pp, buf, (uint)buf.Length);
+            if (st == Native.HIDP_STATUS_SUCCESS)
+                st = Native.HidP_SetUsageValue(Native.HidP_Output, UsagePageConsumer, 0, UsageSetLevel, ToRaw(level, _setLevelBits), _pp, buf, (uint)buf.Length);
+            if (st != Native.HIDP_STATUS_SUCCESS) { error = "HID encoding status 0x" + st.ToString("X8"); return null; }
+            return buf;
+        }
+
+        /// <summary>
+        /// Sends the Set Level output report. The Surface HID mini-driver implements only the write path (WriteFile);
+        /// HidD_SetOutputReport returns ERROR_NOT_SUPPORTED there, so it is kept only as a fallback for other keyboards.
+        /// </summary>
+        public bool SetLevel(int level, out string error)
+        {
+            if (!IsOpen) { error = "device not open"; return false; }
+            var buf = BuildSetLevelReport(level, out error);
+            if (buf == null) return false;
+            LastReportHex = BitConverter.ToString(buf);
+            uint written;
+            if (Native.WriteFile(_h, buf, (uint)buf.Length, out written, IntPtr.Zero))
+            {
+                if (written == buf.Length) return true;
+                error = "short write (" + written + " of " + buf.Length + " bytes)";
+            }
+            else error = "WriteFile error " + Marshal.GetLastWin32Error();
+            if (Native.HidD_SetOutputReport(_h, buf, buf.Length)) { error = ""; return true; }
+            error += "; HidD_SetOutputReport error " + Marshal.GetLastWin32Error();
+            return false;
+        }
+
+        public void Dispose()
+        {
+            if (_h != null && !_h.IsClosed) _h.Close();
+            if (_pp != IntPtr.Zero) { Native.HidD_FreePreparsedData(_pp); _pp = IntPtr.Zero; }
+        }
+    }
+
+    // ------------------------------------------------------------------ Device thread
+    /// <summary>What the app remembers about one keyboard between refreshes. Device thread only.</summary>
+    sealed class DeviceState
+    {
+        public int LastWindowsLevel = -1;   // last ManualBrightnessNits seen, to notice the key being pressed to "off"
+        public bool RespectKeyOff;          // the user turned this keyboard off with its key while the app was running
+        public int LastKnownLevel = -1;
+        public int ConsecutiveFailures;
+        public int LastSentLevel = -1;      // 0 = off via the key
+        public string LastError = "";
+        public DateTime LastSend = DateTime.MinValue;
+        public string LastLogged = ""; public DateTime LastLogTime = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Owns every HID handle; all device I/O happens on this one background thread so a stalled driver can never
+    /// block the UI. The UI submits a job per refresh and receives a report back.
+    /// </summary>
+    sealed class DeviceWorker
+    {
+        public sealed class Job
+        {
+            public int FixedLevel = -1;
+            public bool DipAndRestore;
+            public int IntervalSeconds = 10;
+            public bool WriteLevels;        // false = only (re)detect devices, e.g. while paused
+        }
+
+        public sealed class Report
+        {
+            public DeviceInfo[] Devices = new DeviceInfo[0];
+            public int Lit, OffByKey, Failing;
+            public int Level = -1;          // level of the first lit keyboard
+            public DateTime LastSend = DateTime.MinValue;
+            public string Error = "";
+        }
+
+        readonly Thread _thread;
+        readonly AutoResetEvent _kick = new AutoResetEvent(false);
+        readonly object _jobLock = new object();
+        readonly Action<Report> _onReport;
+        readonly List<BacklightDevice> _devices = new List<BacklightDevice>();
+        readonly Dictionary<string, DeviceState> _states = new Dictionary<string, DeviceState>(StringComparer.OrdinalIgnoreCase);
+        Job _job;
+        volatile bool _stop, _rescanRequested = true, _resetKeyOff;
+        volatile uint _nativeThreadId;
+        long _busySinceTicks;               // UTC ticks while a pass runs, 0 when idle
+
+        public DeviceWorker(Action<Report> onReport)
+        {
+            _onReport = onReport;
+            _thread = new Thread(Loop);
+            _thread.IsBackground = true;
+            _thread.Name = "Backlight device I/O";
+            _thread.Start();
+        }
+
+        public void Submit(Job job) { lock (_jobLock) _job = job; _kick.Set(); }
+        public void RequestRescan() { _rescanRequested = true; }
+        public void ResetKeyOff() { _resetKeyOff = true; }
+
+        /// <summary>How long the current pass has been running; zero when idle.</summary>
+        public TimeSpan BusyFor
+        {
+            get { long t = Interlocked.Read(ref _busySinceTicks); return t == 0 ? TimeSpan.Zero : TimeSpan.FromTicks(DateTime.UtcNow.Ticks - t); }
+        }
+
+        /// <summary>Cancels a synchronous HID call stuck in a driver. The call then fails and the device is re-detected.</summary>
+        public bool CancelStuckIo()
+        {
+            uint tid = _nativeThreadId;
+            if (tid == 0) return false;
+            IntPtr h = Native.OpenThread(Native.THREAD_TERMINATE, false, tid);
+            if (h == IntPtr.Zero) return false;
+            try { return Native.CancelSynchronousIo(h); } finally { Native.CloseHandle(h); }
+        }
+
+        public void Stop() { _stop = true; _kick.Set(); _thread.Join(1500); }
+
+        void Loop()
+        {
+            Thread.BeginThreadAffinity();   // CancelStuckIo targets this exact OS thread
+            _nativeThreadId = Native.GetCurrentThreadId();
+            while (true)
+            {
+                _kick.WaitOne();
+                if (_stop) break;
+                Job job;
+                lock (_jobLock) job = _job;
+                if (job == null) continue;
+                Report report = null;
+                Interlocked.Exchange(ref _busySinceTicks, DateTime.UtcNow.Ticks);
+                try { report = Pass(job); }
+                catch (Exception ex) { Logger.Crash("Device thread error", ex); _rescanRequested = true; }
+                finally { Interlocked.Exchange(ref _busySinceTicks, 0); }
+                if (report != null && !_stop) _onReport(report);
+            }
+            foreach (var d in _devices) d.Dispose();
+            _devices.Clear();
+            Thread.EndThreadAffinity();
+        }
+
+        DeviceState StateFor(BacklightDevice d)
+        {
+            DeviceState s;
+            if (!_states.TryGetValue(d.Path, out s)) { s = new DeviceState(); _states[d.Path] = s; }
+            return s;
+        }
+
+        Report Pass(Job job)
+        {
+            bool failing = false;
+            foreach (var d in _devices) if (StateFor(d).ConsecutiveFailures >= 3) failing = true;
+            if (_rescanRequested || _devices.Count == 0 || failing) Rescan();
+            if (_resetKeyOff) { _resetKeyOff = false; foreach (var s in _states.Values) s.RespectKeyOff = false; }
+
+            var r = new Report();
+            r.Devices = _devices.ConvertAll(d => d.Snapshot()).ToArray();
+            foreach (var d in _devices)
+            {
+                var st = StateFor(d);
+                if (job.WriteLevels) Write(d, st, job);
+                if (st.LastError.Length > 0)
+                {
+                    r.Failing++;
+                    if (r.Error.Length == 0) r.Error = _devices.Count > 1 ? st.LastError + " on " + d.Name : st.LastError;
+                }
+                else if (st.LastSentLevel == 0) r.OffByKey++;
+                else if (st.LastSentLevel > 0)
+                {
+                    r.Lit++;
+                    if (r.Level < 0) r.Level = st.LastSentLevel;
+                    if (st.LastSend > r.LastSend) r.LastSend = st.LastSend;
+                }
+            }
+            return r;
+        }
+
+        void Rescan()
+        {
+            _rescanRequested = false;
+            foreach (var d in _devices) d.Dispose();
+            _devices.Clear();
+            _devices.AddRange(BacklightDevice.FindAll(Logger.Write));
+            if (_devices.Count == 0) Logger.Write("No HID keyboard-backlight collection found. Is this a Surface with a backlit keyboard on Windows 11 25H2 (build 26200.7922+)?");
+            foreach (var d in _devices)
+            {
+                var st = StateFor(d);
+                st.ConsecutiveFailures = 0; st.LastError = ""; st.LastLogged = "";
+                if (st.LastKnownLevel <= 0) { int? lvl = d.ReadDeviceLevel(); if (lvl.HasValue && lvl.Value > 0) st.LastKnownLevel = lvl.Value; }
+            }
+        }
+
+        static void Write(BacklightDevice d, DeviceState st, Job job)
+        {
+            string source;
+            int level = ResolveTargetLevel(d, st, job, out source);
+            if (level <= 0) { st.LastSentLevel = 0; st.LastError = ""; return; }   // turned off with the key: respect it
+            string error, how;
+            bool ok;
+            if (job.DipAndRestore)
+            {
+                int dip = level > d.LogicalMin + 1 ? level - 1 : Math.Min(level + 1, d.LogicalMax);
+                ok = d.SetLevel(dip, out error);
+                if (ok) { Thread.Sleep(20); ok = d.SetLevel(level, out error); }
+                how = "dip via " + dip;
+            }
+            else { ok = d.SetLevel(level, out error); how = "resend"; }
+
+            if (ok)
+            {
+                st.LastSend = DateTime.Now; st.LastSentLevel = level; st.LastError = ""; st.ConsecutiveFailures = 0;
+                if (Logger.Enabled)
+                {
+                    string line = "Sending level " + level + " (" + source + ", " + how + ", report " + d.LastReportHex + ") to " + d.Name;
+                    if (line != st.LastLogged || (DateTime.Now - st.LastLogTime).TotalMinutes >= 10)
+                    {
+                        Logger.Write(line + " every " + job.IntervalSeconds + " s");
+                        st.LastLogged = line; st.LastLogTime = DateTime.Now;
+                    }
+                }
+            }
+            else
+            {
+                st.ConsecutiveFailures++; st.LastError = "write failed, " + error; st.LastLogged = "";
+                Logger.Write("Set Level failed (" + error + ") on " + d.Name + "; failures=" + st.ConsecutiveFailures);
+            }
+        }
+
+        static int ResolveTargetLevel(BacklightDevice d, DeviceState st, Job job, out string source)
+        {
+            if (job.FixedLevel >= 0) { source = "fixed"; return Math.Min(job.FixedLevel, d.LogicalMax); }
+            int? w = d.ReadWindowsLevel();
+            if (w.HasValue)
+            {
+                if (w.Value > 0)
+                {
+                    st.LastKnownLevel = w.Value; st.LastWindowsLevel = w.Value; st.RespectKeyOff = false;
+                    source = "Windows setting"; return w.Value;
+                }
+                // Windows stores "off" for this keyboard. If that changed while the app was running, the user pressed the
+                // backlight key to turn it off: respect that. Otherwise (app start, re-enable) "enabled" means "on".
+                if (st.LastWindowsLevel > 0) st.RespectKeyOff = true;
+                st.LastWindowsLevel = 0;
+                if (st.RespectKeyOff) { source = "off (backlight key)"; return 0; }
+                source = "last used (Windows has it off)";
+                return LastKnownOrDefault(d, st);
+            }
+            int? dl = d.ReadDeviceLevel();
+            if (dl.HasValue && dl.Value > 0) { source = "device"; st.LastKnownLevel = dl.Value; return dl.Value; }
+            source = "last used";
+            return LastKnownOrDefault(d, st);
+        }
+
+        static int LastKnownOrDefault(BacklightDevice d, DeviceState st)
+        {
+            if (st.LastKnownLevel > 0) return st.LastKnownLevel;
+            var nonZero = new List<int>();
+            foreach (int s in d.Suggestions) if (s > 0) nonZero.Add(s);
+            if (nonZero.Count > 0) return nonZero[nonZero.Count / 2];   // middle preset (6 nits on the Surface Laptop Studio 2)
+            return d.LogicalMax;
+        }
     }
 
     // ------------------------------------------------------------------ Settings
@@ -383,28 +815,26 @@ namespace SurfaceBacklightKeeper
         }
     }
 
-    // ------------------------------------------------------------------ Tray application
+    // ------------------------------------------------------------------ Tray application (UI thread)
     sealed class KeeperForm : Form
     {
+        const double StallSeconds = 3;
+
         readonly Settings _s;
         readonly NotifyIcon _tray;
-        readonly System.Windows.Forms.Timer _timer;
-        System.Windows.Forms.Timer _clickTimer;
-        readonly List<BacklightDevice> _devices = new List<BacklightDevice>();
-        readonly Dictionary<string, int> _lastKnownLevel = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        readonly System.Windows.Forms.Timer _timer, _clickTimer;
+        readonly DeviceWorker _worker;
+        readonly Icon _iconOn, _iconOff;
+        DeviceWorker.Report _report;           // latest result from the device thread
+        string _deviceKey;                     // device list the Brightness menu was built for
         IntPtr _powerNotify = IntPtr.Zero;
-        bool _displayOff, _locked, _suspended;
-        int _lastWindowsLevel = -1;   // last ManualBrightnessNits we saw (to detect the user pressing the key to "off")
-        bool _respectKeyOff;          // user turned the light off with the keyboard key while we were running
-        DateTime _lastSend = DateTime.MinValue; int _lastSentLevel = -1; string _lastError = "";
-        int _consecutiveFailures;
-        string _lastLogged = ""; DateTime _lastLogTime = DateTime.MinValue;   // per-write log lines only on change or every 10 min
-        Icon _iconOn, _iconOff;
+        bool _displayOff, _locked, _suspended, _stalled;
         ToolStripMenuItem _miEnabled, _miLevel, _miInterval, _miMethodResend, _miMethodDip, _miPauseDisplay, _miPauseLock, _miPauseBattery, _miStartup, _miLogging, _miStatus;
 
         public KeeperForm()
         {
             _s = Settings.Load();
+            Logger.Enabled = _s.Logging;
             Text = "Surface Keyboard Backlight Keeper"; ShowInTaskbar = false; WindowState = FormWindowState.Minimized; Opacity = 0; FormBorderStyle = FormBorderStyle.FixedToolWindow;
             CreateHandle();
 
@@ -412,107 +842,101 @@ namespace SurfaceBacklightKeeper
             _iconOff = MakeIcon(Color.FromArgb(140, 140, 140), false);
             _tray = new NotifyIcon(); _tray.Icon = _iconOn; _tray.Visible = true; _tray.Text = "Surface Keyboard Backlight Keeper";
             _tray.ContextMenuStrip = BuildMenu();
-            // Left click opens the menu, double-click toggles. The menu is shown after the double-click interval
-            // so a double-click can still be told apart from a single click.
+            // Left click opens the menu, double-click toggles. The menu waits for the double-click interval so the
+            // two can be told apart.
             _clickTimer = new System.Windows.Forms.Timer(); _clickTimer.Interval = Math.Max(150, SystemInformation.DoubleClickTime);
             _clickTimer.Tick += delegate { _clickTimer.Stop(); ShowTrayMenu(); };
             _tray.MouseClick += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) _clickTimer.Start(); };
             _tray.MouseDoubleClick += delegate(object s, MouseEventArgs e) { if (e.Button == MouseButtons.Left) { _clickTimer.Stop(); ToggleEnabled(); } };
 
-            _timer = new System.Windows.Forms.Timer(); _timer.Interval = _s.IntervalSeconds * 1000; _timer.Tick += delegate { Tick(); };
+            _timer = new System.Windows.Forms.Timer(); _timer.Interval = _s.IntervalSeconds * 1000; _timer.Tick += delegate { OnTimer(); };
 
+            // Registration delivers the current display state immediately, then every change.
             Guid g = Native.GUID_CONSOLE_DISPLAY_STATE;
             _powerNotify = Native.RegisterPowerSettingNotification(Handle, ref g, Native.DEVICE_NOTIFY_WINDOW_HANDLE);
+            if (_powerNotify == IntPtr.Zero)
+                Logger.Write("Could not register for display on/off notifications (error " + Marshal.GetLastWin32Error() + "); 'Pause when display is off' will not take effect.");
             SystemEvents.SessionSwitch += OnSessionSwitch;
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            bool? locked = Native.IsSessionLocked();
+            _locked = locked.HasValue && locked.Value;
 
-            Log("---- Surface Keyboard Backlight Keeper " + Application.ProductVersion + " starting (interval " + _s.IntervalSeconds + " s, level " + (_s.FixedLevel < 0 ? "follow Windows" : _s.FixedLevel.ToString()) + ", method " + (_s.DipAndRestore ? "dip-and-restore" : "resend") + ")");
-            Rescan();
+            Logger.Write("---- Surface Keyboard Backlight Keeper " + Application.ProductVersion + " starting (interval " + _s.IntervalSeconds + " s, level " +
+                (_s.FixedLevel < 0 ? "follow Windows" : _s.FixedLevel.ToString()) + ", method " + (_s.DipAndRestore ? "dip-and-restore" : "resend") +
+                ", session " + (locked.HasValue ? (locked.Value ? "locked" : "unlocked") : "lock state unknown") + ")");
+
+            _worker = new DeviceWorker(OnWorkerReport);
             RefreshMenu();
             _timer.Start();
-            Tick();
-
-            if (_devices.Count == 0)
-                _tray.ShowBalloonTip(8000, "Surface Keyboard Backlight Keeper", "No keyboard backlight device was found. This needs a Surface with a backlit keyboard on Windows 11 25H2 or later.", ToolTipIcon.Warning);
-            else if (_s.FirstRun)
-            {
-                _s.Save();
-                _tray.ShowBalloonTip(6000, "Surface Keyboard Backlight Keeper is running", "It keeps the keyboard backlight on once it is lit. Touch the trackpad or a key to light it. Click the tray icon for options.", ToolTipIcon.Info);
-            }
+            RequestPass(true);   // first pass detects the keyboard, and writes unless paused
         }
 
         protected override void SetVisibleCore(bool value) { base.SetVisibleCore(false); }
 
-        // ---------------- device management
-        void Rescan()
+        // ---------------- talking to the device thread
+        /// <summary>
+        /// Hands the device thread a pass with the current settings. While paused nothing is written; a forced pass
+        /// then only (re)detects keyboards so the menu stays accurate.
+        /// </summary>
+        void RequestPass(bool force)
         {
-            foreach (var d in _devices) d.Dispose();
-            _devices.Clear();
-            _devices.AddRange(BacklightDevice.FindAll(Log));
-            _lastLogged = "";
-            if (_devices.Count == 0) Log("No HID keyboard-backlight collection found. Is this a Surface with a backlit keyboard on Windows 11 25H2 (build 26200.7922+)?");
-            foreach (var d in _devices)
+            string why;
+            bool paused = Paused(out why);
+            if (!paused || force)
             {
-                int? lvl = d.ReadDeviceLevel();
-                if (lvl.HasValue && lvl.Value > 0) _lastKnownLevel[d.Path] = lvl.Value;
+                var job = new DeviceWorker.Job();
+                job.FixedLevel = _s.FixedLevel; job.DipAndRestore = _s.DipAndRestore; job.IntervalSeconds = _s.IntervalSeconds;
+                job.WriteLevels = !paused;
+                _worker.Submit(job);
             }
-            _consecutiveFailures = 0;
+            UpdateTray();
         }
 
-        /// <summary>Brightness Windows last applied to this device, read from the Lighting registry state.</summary>
-        internal static int? ReadWindowsLevel(BacklightDevice d)
+        void OnWorkerReport(DeviceWorker.Report r)   // device thread
         {
-            try
+            try { if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action<DeviceWorker.Report>(ApplyReport), r); }
+            catch (InvalidOperationException) { }    // window already gone during exit
+        }
+
+        void ApplyReport(DeviceWorker.Report r)
+        {
+            if (IsDisposed) return;
+            bool first = _report == null;
+            _report = r;
+            _stalled = false;
+            string key = string.Join("|", Array.ConvertAll(r.Devices, d => d.Path));
+            if (key != _deviceKey) { _deviceKey = key; RefreshMenu(); } else UpdateTray();
+            if (!first) return;
+            if (r.Devices.Length == 0)
+                _tray.ShowBalloonTip(8000, "Surface Keyboard Backlight Keeper", "No keyboard backlight device was found. This needs a Surface with a backlit keyboard on Windows 11 25H2 or later.", ToolTipIcon.Warning);
+            else if (_s.FirstRun)
             {
-                using (var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
-                using (var k = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Lighting\Backlight\State\" + d.StateKeyName))
-                {
-                    if (k == null) return null;
-                    object v = k.GetValue("ManualBrightnessNits");
-                    if (v is int) return (int)v;
-                }
+                _s.FirstRun = false; _s.Save();
+                _tray.ShowBalloonTip(6000, "Surface Keyboard Backlight Keeper is running", "It keeps the keyboard backlight on once it is lit. Touch the trackpad or a key to light it. Click the tray icon for options.", ToolTipIcon.Info);
             }
-            catch { }
-            return null;
         }
 
-        int ResolveTargetLevel(BacklightDevice d, out string source)
+        void OnTimer()
         {
-            if (_s.FixedLevel >= 0) { source = "fixed"; return Math.Min(_s.FixedLevel, d.LogicalMax); }
-            int? w = ReadWindowsLevel(d);
-            if (w.HasValue)
+            bool? locked = Native.IsSessionLocked();
+            if (locked.HasValue) _locked = locked.Value;   // self-correcting, in case a session event was missed
+            if (_worker.BusyFor.TotalSeconds >= StallSeconds) { OnStall(); return; }
+            RequestPass(false);
+        }
+
+        void OnStall()
+        {
+            if (!_stalled)
             {
-                if (w.Value > 0)
-                {
-                    _lastKnownLevel[d.Path] = w.Value; _lastWindowsLevel = w.Value; _respectKeyOff = false;
-                    source = "Windows setting"; return w.Value;
-                }
-                // Windows has the backlight at "off". If that changed while we were running, the user pressed the
-                // backlight key to turn it off - respect that. Otherwise (app start / re-enable) "enabled" means "on".
-                if (_lastWindowsLevel > 0) _respectKeyOff = true;
-                _lastWindowsLevel = 0;
-                if (_respectKeyOff) { source = "off (backlight key)"; return 0; }
-                source = "last used (Windows has it off)";
-                return LastKnownOrDefault(d);
+                _stalled = true;
+                Logger.Write("Keyboard backlight device has not responded for " + (int)_worker.BusyFor.TotalSeconds + " s; cancelling the stuck call and re-detecting.");
+                _worker.RequestRescan();
             }
-            int? dl = d.ReadDeviceLevel();
-            if (dl.HasValue && dl.Value > 0) { source = "device"; _lastKnownLevel[d.Path] = dl.Value; return dl.Value; }
-            source = "last used";
-            return LastKnownOrDefault(d);
+            _worker.CancelStuckIo();
+            UpdateTray();
         }
 
-        int LastKnownOrDefault(BacklightDevice d)
-        {
-            int last;
-            if (_lastKnownLevel.TryGetValue(d.Path, out last) && last > 0) return last;
-            int? dl = d.ReadDeviceLevel();
-            if (dl.HasValue && dl.Value > 0) return dl.Value;
-            var nonZero = new List<int>(); foreach (int s in d.Suggestions) if (s > 0) nonZero.Add(s);
-            if (nonZero.Count > 0) return nonZero[nonZero.Count / 2];   // middle preset (6 nits on the Surface Laptop Studio 2)
-            return d.LogicalMax;
-        }
-
-        /// <summary>True while "SurfaceBacklightKeeper.exe --test" is cycling the levels, so the tray app does not interfere.</summary>
+        /// <summary>True while "SurfaceKeyboardBacklightKeeper.exe --test" is cycling the levels, so the tray app does not interfere.</summary>
         static bool SelfTestRunning()
         {
             EventWaitHandle ev;
@@ -532,62 +956,19 @@ namespace SurfaceBacklightKeeper
             return false;
         }
 
-        void Tick()
-        {
-            string why;
-            if (Paused(out why)) { UpdateTray(); return; }
-            if (_devices.Count == 0 || _consecutiveFailures >= 3)
-            {
-                Rescan();
-                if (_devices.Count == 0) { UpdateTray(); return; }
-            }
-            foreach (var d in _devices)
-            {
-                string src;
-                int level = ResolveTargetLevel(d, out src);
-                if (level <= 0) { _lastSentLevel = 0; _lastError = ""; continue; } // user turned the backlight off with the key - respect it
-                int err; bool ok;
-                string how;
-                if (_s.DipAndRestore)
-                {
-                    int dip = level > d.LogicalMin + 1 ? level - 1 : Math.Min(level + 1, d.LogicalMax);
-                    ok = d.SetLevel(dip, out err);
-                    if (ok) { Thread.Sleep(20); ok = d.SetLevel(level, out err); }
-                    how = "dip via " + dip;
-                }
-                else { ok = d.SetLevel(level, out err); how = "resend"; }
-
-                if (ok)
-                {
-                    _lastSend = DateTime.Now; _lastSentLevel = level; _lastError = ""; _consecutiveFailures = 0;
-                    if (_s.Logging)
-                    {
-                        string line = "Sending level " + level + " (" + src + ", " + how + ") to " + d.Name;
-                        if (line != _lastLogged || (DateTime.Now - _lastLogTime).TotalMinutes >= 10) { Log(line + " every " + _s.IntervalSeconds + " s"); _lastLogged = line; _lastLogTime = DateTime.Now; }
-                    }
-                }
-                else { _consecutiveFailures++; _lastError = "write failed, error " + err; _lastLogged = ""; Log("Set Level failed (error " + err + ") on " + d.Name + "; failures=" + _consecutiveFailures); }
-            }
-            UpdateTray();
-        }
-
         // ---------------- system events
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == Native.WM_POWERBROADCAST)
+            if (m.Msg == Native.WM_POWERBROADCAST && (int)m.WParam.ToInt64() == Native.PBT_POWERSETTINGCHANGE && m.LParam != IntPtr.Zero)
             {
-                int evt = (int)m.WParam.ToInt64();
-                if (evt == Native.PBT_POWERSETTINGCHANGE && m.LParam != IntPtr.Zero)
+                var ps = (Native.POWERBROADCAST_SETTING)Marshal.PtrToStructure(m.LParam, typeof(Native.POWERBROADCAST_SETTING));
+                if (ps.PowerSetting == Native.GUID_CONSOLE_DISPLAY_STATE)
                 {
-                    var ps = (Native.POWERBROADCAST_SETTING)Marshal.PtrToStructure(m.LParam, typeof(Native.POWERBROADCAST_SETTING));
-                    if (ps.PowerSetting == Native.GUID_CONSOLE_DISPLAY_STATE)
-                    {
-                        bool wasOff = _displayOff;
-                        _displayOff = ps.Data == 0;
-                        if (_s.Logging) Log("Display state -> " + (ps.Data == 0 ? "off" : ps.Data == 2 ? "dimmed" : "on"));
-                        // The embedded controller relights the keyboard when the display comes back; re-arm right away.
-                        if (wasOff && !_displayOff) Tick(); else UpdateTray();
-                    }
+                    bool wasOff = _displayOff;
+                    _displayOff = ps.Data == 0;
+                    Logger.Write("Display state -> " + (ps.Data == 0 ? "off" : ps.Data == 2 ? "dimmed" : "on"));
+                    // The embedded controller relights the keyboard when the display comes back; re-arm right away.
+                    if (wasOff && !_displayOff && _worker != null) RequestPass(false); else UpdateTray();
                 }
             }
             base.WndProc(ref m);
@@ -595,23 +976,26 @@ namespace SurfaceBacklightKeeper
 
         void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
         {
-            if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.ConsoleDisconnect || e.Reason == SessionSwitchReason.RemoteDisconnect) _locked = true;
-            else if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.ConsoleConnect || e.Reason == SessionSwitchReason.RemoteConnect) { _locked = false; Tick(); return; }
-            UpdateTray();
+            if (InvokeRequired) { BeginInvoke(new SessionSwitchEventHandler(OnSessionSwitch), sender, e); return; }
+            if (e.Reason == SessionSwitchReason.SessionLock || e.Reason == SessionSwitchReason.ConsoleDisconnect || e.Reason == SessionSwitchReason.RemoteDisconnect)
+            { _locked = true; UpdateTray(); }
+            else if (e.Reason == SessionSwitchReason.SessionUnlock || e.Reason == SessionSwitchReason.ConsoleConnect || e.Reason == SessionSwitchReason.RemoteConnect)
+            { _locked = false; RequestPass(false); }
         }
 
         void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
         {
+            if (InvokeRequired) { BeginInvoke(new PowerModeChangedEventHandler(OnPowerModeChanged), sender, e); return; }
             if (e.Mode == PowerModes.Resume)
             {
                 _suspended = false;
-                // Give the SAM keyboard a moment to come back, then re-open it.
+                // Give the keyboard a moment to come back, then re-open it.
                 var t = new System.Windows.Forms.Timer(); t.Interval = 4000;
-                t.Tick += delegate { t.Stop(); t.Dispose(); Rescan(); Tick(); };
+                t.Tick += delegate { t.Stop(); t.Dispose(); _worker.RequestRescan(); RequestPass(false); };
                 t.Start();
             }
             else if (e.Mode == PowerModes.Suspend) { _suspended = true; UpdateTray(); }
-            else if (e.Mode == PowerModes.StatusChange) Tick();   // AC/battery change may start or end the "on battery" pause
+            else if (e.Mode == PowerModes.StatusChange) RequestPass(false);   // AC/battery change may start or end the battery pause
         }
 
         // ---------------- tray UI
@@ -620,28 +1004,34 @@ namespace SurfaceBacklightKeeper
             var m = new ContextMenuStrip();
             _miStatus = new ToolStripMenuItem("Status"); _miStatus.Enabled = false; m.Items.Add(_miStatus);
             m.Items.Add(new ToolStripSeparator());
-            _miEnabled = new ToolStripMenuItem("Keep keyboard backlight on", null, delegate { ToggleEnabled(); }); _miEnabled.CheckOnClick = false; m.Items.Add(_miEnabled);
+            _miEnabled = new ToolStripMenuItem("Keep keyboard backlight on", null, delegate { ToggleEnabled(); }); m.Items.Add(_miEnabled);
             _miLevel = new ToolStripMenuItem("Brightness"); m.Items.Add(_miLevel);
             _miInterval = new ToolStripMenuItem("Refresh every"); m.Items.Add(_miInterval);
             foreach (int sec in new[] { 5, 10, 15 })
             {
-                int s = sec; var mi = new ToolStripMenuItem(s + " seconds", null, delegate { _s.IntervalSeconds = s; _timer.Interval = s * 1000; _s.Save(); RefreshMenu(); Tick(); });
-                _miInterval.DropDownItems.Add(mi);
+                int s = sec;
+                _miInterval.DropDownItems.Add(new ToolStripMenuItem(s + " seconds", null, delegate { _s.IntervalSeconds = s; _timer.Interval = s * 1000; _s.Save(); RefreshMenu(); RequestPass(false); }));
             }
             var method = new ToolStripMenuItem("Keep-alive method"); m.Items.Add(method);
             _miMethodResend = new ToolStripMenuItem("Re-send the current level (default, no flicker)", null, delegate { _s.DipAndRestore = false; _s.Save(); RefreshMenu(); });
             _miMethodDip = new ToolStripMenuItem("Tiny dip and restore on every refresh (only if the light still times out)", null, delegate { _s.DipAndRestore = true; _s.Save(); RefreshMenu(); });
             method.DropDownItems.Add(_miMethodResend); method.DropDownItems.Add(_miMethodDip);
             var pause = new ToolStripMenuItem("Pause when"); m.Items.Add(pause);
-            _miPauseDisplay = new ToolStripMenuItem("Display is off", null, delegate { _s.PauseWhenDisplayOff = !_s.PauseWhenDisplayOff; _s.Save(); RefreshMenu(); Tick(); });
-            _miPauseLock = new ToolStripMenuItem("Screen is locked", null, delegate { _s.PauseWhenLocked = !_s.PauseWhenLocked; _s.Save(); RefreshMenu(); Tick(); });
-            _miPauseBattery = new ToolStripMenuItem("Running on battery", null, delegate { _s.PauseOnBattery = !_s.PauseOnBattery; _s.Save(); RefreshMenu(); Tick(); });
+            _miPauseDisplay = new ToolStripMenuItem("Display is off", null, delegate { _s.PauseWhenDisplayOff = !_s.PauseWhenDisplayOff; _s.Save(); RefreshMenu(); RequestPass(false); });
+            _miPauseLock = new ToolStripMenuItem("Screen is locked", null, delegate { _s.PauseWhenLocked = !_s.PauseWhenLocked; _s.Save(); RefreshMenu(); RequestPass(false); });
+            _miPauseBattery = new ToolStripMenuItem("Running on battery", null, delegate { _s.PauseOnBattery = !_s.PauseOnBattery; _s.Save(); RefreshMenu(); RequestPass(false); });
             pause.DropDownItems.Add(_miPauseDisplay); pause.DropDownItems.Add(_miPauseLock); pause.DropDownItems.Add(_miPauseBattery);
             m.Items.Add(new ToolStripSeparator());
             _miStartup = new ToolStripMenuItem("Start with Windows", null, delegate { Settings.SetStartWithWindows(!Settings.IsStartWithWindows()); RefreshMenu(); }); m.Items.Add(_miStartup);
-            _miLogging = new ToolStripMenuItem("Write log file", null, delegate { _s.Logging = !_s.Logging; _s.Save(); RefreshMenu(); if (_s.Logging) Log("Logging enabled"); }); m.Items.Add(_miLogging);
-            m.Items.Add(new ToolStripMenuItem("Open log folder", null, delegate { try { Directory.CreateDirectory(LogDir); Process.Start("explorer.exe", LogDir); } catch { } }));
-            m.Items.Add(new ToolStripMenuItem("Re-detect keyboard", null, delegate { Rescan(); RefreshMenu(); Tick(); }));
+            _miLogging = new ToolStripMenuItem("Write log file", null, delegate
+            {
+                _s.Logging = !_s.Logging; _s.Save(); Logger.Enabled = _s.Logging;
+                if (_s.Logging) Logger.Write("Logging enabled (version " + Application.ProductVersion + ")");
+                RefreshMenu();
+            });
+            m.Items.Add(_miLogging);
+            m.Items.Add(new ToolStripMenuItem("Open log folder", null, delegate { try { Directory.CreateDirectory(Logger.Dir); Process.Start("explorer.exe", Logger.Dir); } catch { } }));
+            m.Items.Add(new ToolStripMenuItem("Re-detect keyboard", null, delegate { _worker.RequestRescan(); RequestPass(true); }));
             m.Items.Add(new ToolStripSeparator());
             var about = new ToolStripMenuItem("About"); m.Items.Add(about);
             var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
@@ -680,8 +1070,9 @@ namespace SurfaceBacklightKeeper
         void ToggleEnabled()
         {
             _s.Enabled = !_s.Enabled; _s.Save();
-            if (_s.Enabled) _respectKeyOff = false;   // enabling means "on", even if the key had turned it off earlier
-            RefreshMenu(); Tick();
+            if (_s.Enabled) _worker.ResetKeyOff();   // enabling means "on", even if the key had turned a keyboard off earlier
+            RefreshMenu();
+            RequestPass(false);
         }
 
         void RefreshMenu()
@@ -693,11 +1084,11 @@ namespace SurfaceBacklightKeeper
             _miStartup.Checked = Settings.IsStartWithWindows(); _miLogging.Checked = _s.Logging;
 
             _miLevel.DropDownItems.Clear();
-            var follow = new ToolStripMenuItem("Follow Windows setting (use the keyboard's backlight key)", null, delegate { _s.FixedLevel = -1; _s.Save(); RefreshMenu(); Tick(); });
+            var follow = new ToolStripMenuItem("Follow Windows setting (use the keyboard's backlight key)", null, delegate { _s.FixedLevel = -1; _s.Save(); RefreshMenu(); RequestPass(false); });
             follow.Checked = _s.FixedLevel < 0; _miLevel.DropDownItems.Add(follow);
-            if (_devices.Count > 0)
+            var d = _report != null && _report.Devices.Length > 0 ? _report.Devices[0] : null;
+            if (d != null)
             {
-                var d = _devices[0];
                 var levels = new List<int>(d.Suggestions);
                 if (levels.Count == 0) { for (int l = d.LogicalMin; l <= d.LogicalMax; l++) levels.Add(l); }
                 if (!levels.Contains(d.LogicalMax)) levels.Add(d.LogicalMax);
@@ -706,7 +1097,7 @@ namespace SurfaceBacklightKeeper
                 {
                     if (lv <= 0) continue;
                     int l = lv; idx++;
-                    var mi = new ToolStripMenuItem("Always level " + idx + "  (" + l + " nits)", null, delegate { _s.FixedLevel = l; _s.Save(); RefreshMenu(); Tick(); });
+                    var mi = new ToolStripMenuItem("Always level " + idx + "  (" + l + " nits)", null, delegate { _s.FixedLevel = l; _s.Save(); RefreshMenu(); RequestPass(false); });
                     mi.Checked = _s.FixedLevel == l; _miLevel.DropDownItems.Add(mi);
                 }
             }
@@ -715,18 +1106,26 @@ namespace SurfaceBacklightKeeper
 
         void UpdateTray()
         {
-            string why; bool paused = Paused(out why);
+            string why;
+            bool paused = Paused(out why);
+            var r = _report;
             string status;
-            if (_devices.Count == 0) status = "No keyboard backlight device found";
-            else if (paused) status = "Paused: " + why;
-            else if (_lastError.Length > 0) status = "Error: " + _lastError;
-            else if (_lastSentLevel == 0) status = "Off via the backlight key - press it again to turn it back on";
-            else if (_lastSentLevel > 0) status = "Keeping backlight on at " + _lastSentLevel + " nits (last sent " + _lastSend.ToString("HH:mm:ss") + ")";
+            bool dim = false;
+            if (r == null) status = "Starting...";
+            else if (r.Devices.Length == 0) { status = "No keyboard backlight device found"; dim = true; }
+            else if (_stalled) { status = "Keyboard not responding - retrying"; dim = true; }
+            else if (paused) { status = "Paused: " + why; dim = true; }
+            else if (r.Failing > 0) { status = "Error: " + r.Error; dim = true; }
+            else if (r.Lit == 0 && r.OffByKey > 0) status = "Off via the backlight key - press it again to turn it back on";
+            else if (r.Lit > 0)
+                status = (r.Devices.Length > 1 ? "Keeping " + r.Lit + " of " + r.Devices.Length + " keyboards on" : "Keeping backlight on at " + r.Level + " nits")
+                    + " (last sent " + r.LastSend.ToString("HH:mm:ss") + ")";
             else status = "Starting...";
             _miStatus.Text = status;
-            string tip = "Backlight Keeper: " + status; if (tip.Length > 63) tip = tip.Substring(0, 60) + "..."; // NotifyIcon.Text max is 63 chars on .NET Framework
+            string tip = "Backlight Keeper: " + status;
+            if (tip.Length > 63) tip = tip.Substring(0, 60) + "...";   // NotifyIcon.Text max is 63 chars on .NET Framework
             _tray.Text = tip;
-            _tray.Icon = (paused || _devices.Count == 0 || _lastError.Length > 0) ? _iconOff : _iconOn;
+            _tray.Icon = dim ? _iconOff : _iconOn;
         }
 
         static Icon MakeIcon(Color glow, bool lit)
@@ -750,36 +1149,12 @@ namespace SurfaceBacklightKeeper
             }
         }
 
-        // ---------------- logging
-        static string LogDir { get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SurfaceBacklightKeeper"); } }
-        static readonly object _logLock = new object();
-        void Log(string msg)
-        {
-            // Startup/device/error lines are always written; per-tick lines only when logging is enabled (callers check).
-            try
-            {
-                lock (_logLock)
-                {
-                    Directory.CreateDirectory(LogDir);
-                    var f = System.IO.Path.Combine(LogDir, "keeper.log");
-                    if (File.Exists(f) && new FileInfo(f).Length > 512 * 1024)
-                    {
-                        var old = System.IO.Path.Combine(LogDir, "keeper.old.log");
-                        if (File.Exists(old)) File.Delete(old);
-                        File.Move(f, old);   // keep one previous log instead of discarding history
-                    }
-                    File.AppendAllText(f, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + msg + Environment.NewLine);
-                }
-            }
-            catch { }
-        }
-
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
-            _timer.Stop();
+            _timer.Stop(); _clickTimer.Stop();
             SystemEvents.SessionSwitch -= OnSessionSwitch; SystemEvents.PowerModeChanged -= OnPowerModeChanged;
             if (_powerNotify != IntPtr.Zero) Native.UnregisterPowerSettingNotification(_powerNotify);
-            foreach (var d in _devices) d.Dispose();
+            _worker.Stop();
             _tray.Visible = false; _tray.Dispose();
             base.OnFormClosed(e);
         }
@@ -795,8 +1170,8 @@ namespace SurfaceBacklightKeeper
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-            Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { LogCrash("UI thread exception", e.Exception); };
-            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { LogCrash("Unhandled exception", e.ExceptionObject as Exception); };
+            Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e) { Logger.Crash("UI thread exception", e.Exception); };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { Logger.Crash("Unhandled exception", e.ExceptionObject as Exception); };
             if (args.Length > 0 && (args[0] == "--test" || args[0] == "/test")) { RunSelfTest(); return; }
 
             bool created;
@@ -804,22 +1179,11 @@ namespace SurfaceBacklightKeeper
             {
                 if (!created) return;
                 try { Application.Run(new KeeperForm()); }
-                catch (Exception ex) { LogCrash("Fatal", ex); throw; }
+                catch (Exception ex) { Logger.Crash("Fatal", ex); throw; }
             }
         }
 
-        static void LogCrash(string what, Exception ex)
-        {
-            try
-            {
-                var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SurfaceBacklightKeeper");
-                Directory.CreateDirectory(dir);
-                File.AppendAllText(System.IO.Path.Combine(dir, "keeper.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + what + ": " + (ex == null ? "(null)" : ex.ToString()) + Environment.NewLine);
-            }
-            catch { }
-        }
-
-        /// <summary>Visibly steps the backlight through every level so the user can confirm the app controls it.</summary>
+        /// <summary>Visibly steps the backlight through its levels so the user can confirm the app controls it.</summary>
         static void RunSelfTest()
         {
             var sb = new StringBuilder();
@@ -830,31 +1194,34 @@ namespace SurfaceBacklightKeeper
                 return;
             }
             var d = devices[0];
-            int? restore = KeeperForm.ReadWindowsLevel(d);
+            for (int i = 1; i < devices.Count; i++) devices[i].Dispose();
+            int? restore = d.ReadWindowsLevel();
             if (!restore.HasValue) restore = d.ReadDeviceLevel();
             // Never write level 0: the firmware would switch the light off and only a key press or trackpad touch brings it back.
-            var levels = new List<int>(); foreach (int s in d.Suggestions) if (s > 0) levels.Add(s);
+            var levels = new List<int>();
+            foreach (int s in d.Suggestions) if (s > 0) levels.Add(s);
             if (levels.Count < 2) { levels.Clear(); levels.Add(Math.Max(1, d.LogicalMin)); levels.Add((d.LogicalMin + d.LogicalMax) / 2); levels.Add(d.LogicalMax); }
-            var seq = new List<int>(levels); levels.Reverse(); seq.AddRange(levels); // up then down
+            var seq = new List<int>(levels); levels.Reverse(); seq.AddRange(levels);   // up then down
             var log = new StringBuilder();
-            int failures = 0, err;
+            int failures = 0;
+            string err;
             using (var pauseTray = new EventWaitHandle(true, EventResetMode.ManualReset, SelfTestEventName))
             {
                 foreach (int l in seq)
                 {
                     bool ok = d.SetLevel(l, out err);
-                    log.AppendLine("Set level " + l + " nits -> " + (ok ? "OK" : "FAILED (error " + err + ")"));
+                    log.AppendLine("Set level " + l + " nits (report " + d.LastReportHex + ") -> " + (ok ? "OK" : "FAILED: " + err));
                     if (!ok) failures++;
                     Thread.Sleep(900);
                 }
-                if (restore.HasValue) d.SetLevel(restore.Value, out err);
+                if (restore.HasValue && restore.Value > 0) d.SetLevel(restore.Value, out err);
                 pauseTray.Reset();
             }
             d.Dispose();
             MessageBox.Show("Device: " + d.Name + " (VID " + d.Vid.ToString("X4") + " PID " + d.Pid.ToString("X4") + ")\r\n" +
                 "Levels reported by the keyboard: " + string.Join(", ", Array.ConvertAll(d.Suggestions, delegate(int x) { return x.ToString(); })) + " nits\r\n\r\n" +
-                log + "\r\n" + (failures == 0 ? "If you saw the keyboard light step up and back down, the app can control the backlight.\r\n(The light must already be on: touch the trackpad, then run the test.)" : failures + " write(s) failed - see the log folder for details.") +
-                (restore.HasValue ? "\r\nRestored Windows' level: " + restore.Value + " nits." : ""),
+                log + "\r\n" + (failures == 0 ? "If you saw the keyboard light step up and back down, the app can control the backlight.\r\n(The light must already be on: touch the trackpad, then run the test.)" : failures + " write(s) failed.") +
+                (restore.HasValue && restore.Value > 0 ? "\r\nRestored Windows' level: " + restore.Value + " nits." : ""),
                 "Surface Keyboard Backlight Keeper - self test", MessageBoxButtons.OK, failures == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
     }
