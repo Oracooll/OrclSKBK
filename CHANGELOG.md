@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.001 (8 October 2026)
+
+* **Renamed to OrclSKBK** (Oracooll Surface Keyboard Backlight Keeper), with the exe now
+  `OrclSKBK.exe` and the GitHub repo `Oracooll/OrclSKBK`. The old repo address redirects.
+* Versions now follow the Oracooll 1.X.XXX scheme. The version appears in the tray tooltip title,
+  the About menu, the exe's file properties and the release title.
+* Settings, log folder, startup entry and Start menu shortcut use the new name. Settings from
+  1.2.0 and earlier are copied on first start. `install.ps1` removes the old version's startup
+  entry, shortcut and exe, and `uninstall.ps1` cleans up both names.
+* Releases attach `OrclSKBK.exe` directly as well as the zip, with SHA-256 for both.
+* No change to how the backlight is kept on.
 ## 1.2.0 (4 October 2026)
 
 Addresses the findings of an independent code audit of v1.1.0 (4 October 2026). No change in

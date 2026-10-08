@@ -1,4 +1,4 @@
-// Surface Keyboard Backlight Keeper - keeps the Surface keyboard backlight from timing out.
+// OrclSKBK (Oracooll Surface Keyboard Backlight Keeper) - keeps the Surface keyboard backlight from timing out.
 // Made by Claude (Anthropic's AI model), prompted, tested and directed by Oracooll. MIT License.
 //
 // How it works: Windows 11 25H2 drives Surface keyboard backlights through a standard
@@ -22,8 +22,8 @@
 //
 // Build (no SDK needed, uses the .NET Framework compiler that ships with Windows): run build.ps1, or
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /target:winexe /optimize+
-//     /out:SurfaceKeyboardBacklightKeeper.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll
-//     /win32manifest:app.manifest SurfaceBacklightKeeper.cs
+//     /out:OrclSKBK.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll
+//     /win32manifest:app.manifest OrclSKBK.cs
 //
 // Written in C# 5 syntax on purpose so the in-box compiler can build it.
 
@@ -40,16 +40,27 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
-[assembly: System.Reflection.AssemblyTitle("Surface Keyboard Backlight Keeper")]
-[assembly: System.Reflection.AssemblyProduct("Surface Keyboard Backlight Keeper")]
-[assembly: System.Reflection.AssemblyDescription("Keeps the Surface keyboard backlight from timing out. Made by Claude, prompted by Oracooll.")]
+[assembly: System.Reflection.AssemblyTitle("OrclSKBK " + OrclSKBK.AppInfo.Version)]
+[assembly: System.Reflection.AssemblyProduct(OrclSKBK.AppInfo.Name)]
+[assembly: System.Reflection.AssemblyDescription("OrclSKBK - Oracooll Surface Keyboard Backlight Keeper. Keeps the Surface keyboard backlight from timing out. Made by Claude, prompted by Oracooll.")]
 [assembly: System.Reflection.AssemblyCompany("Made by Claude, prompted by Oracooll")]
 [assembly: System.Reflection.AssemblyCopyright("MIT License. Copyright (c) 2026 Oracooll. Made by Claude.")]
-[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion(OrclSKBK.AppInfo.NumericVersion)]
+[assembly: System.Reflection.AssemblyFileVersion(OrclSKBK.AppInfo.NumericVersion)]
+[assembly: System.Reflection.AssemblyInformationalVersion(OrclSKBK.AppInfo.Version)]
 
-namespace SurfaceBacklightKeeper
+namespace OrclSKBK
 {
+    /// <summary>Name and version. Versions follow the Oracooll 1.X.XXX scheme; bump both constants together.</summary>
+    static class AppInfo
+    {
+        public const string Name = "OrclSKBK";
+        public const string Version = "1.3.001";             // shown to users, used for the release tag
+        public const string NumericVersion = "1.3.1.0";      // the same version in Windows' four-number form
+        public const string DisplayName = Name + " " + Version;
+        public const string LongName = "Oracooll Surface Keyboard Backlight Keeper";
+    }
+
     // ------------------------------------------------------------------ Win32 / HID interop
     static class Native
     {
@@ -181,7 +192,7 @@ namespace SurfaceBacklightKeeper
 
     // ------------------------------------------------------------------ Log file
     /// <summary>
-    /// %LOCALAPPDATA%\SurfaceBacklightKeeper\keeper.log. Normal lines are written only while "Write log file" is ticked.
+    /// %LOCALAPPDATA%\OrclSKBK\keeper.log. Normal lines are written only while "Write log file" is ticked.
     /// Crash reports are always written. Both go through the same rotation (one previous file kept, ~512 KB each).
     /// </summary>
     static class Logger
@@ -190,7 +201,7 @@ namespace SurfaceBacklightKeeper
         static readonly object Sync = new object();
         const long MaxBytes = 512 * 1024;
 
-        public static string Dir { get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SurfaceBacklightKeeper"); } }
+        public static string Dir { get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OrclSKBK"); } }
 
         public static void Write(string message) { if (Enabled) Append(message); }
 
@@ -737,7 +748,8 @@ namespace SurfaceBacklightKeeper
     // ------------------------------------------------------------------ Settings
     sealed class Settings
     {
-        const string KeyPath = @"Software\SurfaceBacklightKeeper";
+        const string KeyPath = @"Software\OrclSKBK";
+        const string LegacyKeyPath = @"Software\SurfaceBacklightKeeper";   // name used up to 1.2.0
         public bool Enabled = true;
         public int IntervalSeconds = 10;
         public int FixedLevel = -1;            // -1 = follow Windows setting
@@ -748,8 +760,25 @@ namespace SurfaceBacklightKeeper
         public bool Logging = false;
         public bool FirstRun;                  // no settings key existed when the app started
 
+        /// <summary>Copies settings saved under the pre-1.3 name the first time OrclSKBK runs, so an upgrade keeps them.</summary>
+        static void MigrateLegacySettings()
+        {
+            try
+            {
+                using (var existing = Registry.CurrentUser.OpenSubKey(KeyPath)) { if (existing != null) return; }
+                using (var old = Registry.CurrentUser.OpenSubKey(LegacyKeyPath))
+                {
+                    if (old == null) return;
+                    using (var k = Registry.CurrentUser.CreateSubKey(KeyPath))
+                        foreach (string name in old.GetValueNames()) k.SetValue(name, old.GetValue(name), old.GetValueKind(name));
+                }
+            }
+            catch { }
+        }
+
         public static Settings Load()
         {
+            MigrateLegacySettings();
             var s = new Settings();
             try
             {
@@ -796,7 +825,8 @@ namespace SurfaceBacklightKeeper
         }
 
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-        const string RunName = "SurfaceBacklightKeeper";
+        const string RunName = "OrclSKBK";
+        const string LegacyRunName = "SurfaceBacklightKeeper";   // name used up to 1.2.0
         public static bool IsStartWithWindows()
         {
             try { using (var k = Registry.CurrentUser.OpenSubKey(RunKey)) { return k != null && k.GetValue(RunName) != null; } } catch { return false; }
@@ -809,6 +839,7 @@ namespace SurfaceBacklightKeeper
                 {
                     if (on) k.SetValue(RunName, "\"" + Application.ExecutablePath + "\"");
                     else k.DeleteValue(RunName, false);
+                    k.DeleteValue(LegacyRunName, false);   // never start the old version alongside this one
                 }
             }
             catch { }
@@ -835,12 +866,12 @@ namespace SurfaceBacklightKeeper
         {
             _s = Settings.Load();
             Logger.Enabled = _s.Logging;
-            Text = "Surface Keyboard Backlight Keeper"; ShowInTaskbar = false; WindowState = FormWindowState.Minimized; Opacity = 0; FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            Text = AppInfo.DisplayName; ShowInTaskbar = false; WindowState = FormWindowState.Minimized; Opacity = 0; FormBorderStyle = FormBorderStyle.FixedToolWindow;
             CreateHandle();
 
             _iconOn = MakeIcon(Color.FromArgb(255, 214, 92), true);
             _iconOff = MakeIcon(Color.FromArgb(140, 140, 140), false);
-            _tray = new NotifyIcon(); _tray.Icon = _iconOn; _tray.Visible = true; _tray.Text = "Surface Keyboard Backlight Keeper";
+            _tray = new NotifyIcon(); _tray.Icon = _iconOn; _tray.Visible = true; _tray.Text = AppInfo.DisplayName;
             _tray.ContextMenuStrip = BuildMenu();
             // Left click opens the menu, double-click toggles. The menu waits for the double-click interval so the
             // two can be told apart.
@@ -861,7 +892,7 @@ namespace SurfaceBacklightKeeper
             bool? locked = Native.IsSessionLocked();
             _locked = locked.HasValue && locked.Value;
 
-            Logger.Write("---- Surface Keyboard Backlight Keeper " + Application.ProductVersion + " starting (interval " + _s.IntervalSeconds + " s, level " +
+            Logger.Write("---- " + AppInfo.DisplayName + " starting (interval " + _s.IntervalSeconds + " s, level " +
                 (_s.FixedLevel < 0 ? "follow Windows" : _s.FixedLevel.ToString()) + ", method " + (_s.DipAndRestore ? "dip-and-restore" : "resend") +
                 ", session " + (locked.HasValue ? (locked.Value ? "locked" : "unlocked") : "lock state unknown") + ")");
 
@@ -908,11 +939,11 @@ namespace SurfaceBacklightKeeper
             if (key != _deviceKey) { _deviceKey = key; RefreshMenu(); } else UpdateTray();
             if (!first) return;
             if (r.Devices.Length == 0)
-                _tray.ShowBalloonTip(8000, "Surface Keyboard Backlight Keeper", "No keyboard backlight device was found. This needs a Surface with a backlit keyboard on Windows 11 25H2 or later.", ToolTipIcon.Warning);
+                _tray.ShowBalloonTip(8000, AppInfo.DisplayName, "No keyboard backlight device was found. This needs a Surface with a backlit keyboard on Windows 11 25H2 or later.", ToolTipIcon.Warning);
             else if (_s.FirstRun)
             {
                 _s.FirstRun = false; _s.Save();
-                _tray.ShowBalloonTip(6000, "Surface Keyboard Backlight Keeper is running", "It keeps the keyboard backlight on once it is lit. Touch the trackpad or a key to light it. Click the tray icon for options.", ToolTipIcon.Info);
+                _tray.ShowBalloonTip(6000, AppInfo.DisplayName + " is running", "It keeps the keyboard backlight on once it is lit. Touch the trackpad or a key to light it. Click the tray icon for options.", ToolTipIcon.Info);
             }
         }
 
@@ -936,7 +967,7 @@ namespace SurfaceBacklightKeeper
             UpdateTray();
         }
 
-        /// <summary>True while "SurfaceKeyboardBacklightKeeper.exe --test" is cycling the levels, so the tray app does not interfere.</summary>
+        /// <summary>True while "OrclSKBK.exe --test" is cycling the levels, so the tray app does not interfere.</summary>
         static bool SelfTestRunning()
         {
             EventWaitHandle ev;
@@ -1026,7 +1057,7 @@ namespace SurfaceBacklightKeeper
             _miLogging = new ToolStripMenuItem("Write log file", null, delegate
             {
                 _s.Logging = !_s.Logging; _s.Save(); Logger.Enabled = _s.Logging;
-                if (_s.Logging) Logger.Write("Logging enabled (version " + Application.ProductVersion + ")");
+                if (_s.Logging) Logger.Write("Logging enabled (" + AppInfo.DisplayName + ")");
                 RefreshMenu();
             });
             m.Items.Add(_miLogging);
@@ -1034,12 +1065,12 @@ namespace SurfaceBacklightKeeper
             m.Items.Add(new ToolStripMenuItem("Re-detect keyboard", null, delegate { _worker.RequestRescan(); RequestPass(true); }));
             m.Items.Add(new ToolStripSeparator());
             var about = new ToolStripMenuItem("About"); m.Items.Add(about);
-            var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
             foreach (string line in new[] {
-                "Surface Keyboard Backlight Keeper",
-                "Version " + ver.Major + "." + ver.Minor + "." + ver.Build,
+                AppInfo.Name,
+                AppInfo.LongName,
+                "Version " + AppInfo.Version,
                 "Made by Claude, prompted by Oracooll",
-                "Open source (MIT): github.com/Oracooll/SurfaceKeyboardBacklightKeeper",
+                "Open source (MIT): github.com/Oracooll/OrclSKBK",
                 "-",
                 "Keeps the Surface keyboard backlight from switching off after",
                 "~30 s without typing. Every few seconds it re-sends the brightness",
@@ -1122,7 +1153,7 @@ namespace SurfaceBacklightKeeper
                     + " (last sent " + r.LastSend.ToString("HH:mm:ss") + ")";
             else status = "Starting...";
             _miStatus.Text = status;
-            string tip = "Backlight Keeper: " + status;
+            string tip = "OrclSKBK: " + status;
             if (tip.Length > 63) tip = tip.Substring(0, 60) + "...";   // NotifyIcon.Text max is 63 chars on .NET Framework
             _tray.Text = tip;
             _tray.Icon = dim ? _iconOff : _iconOn;
@@ -1162,7 +1193,7 @@ namespace SurfaceBacklightKeeper
 
     static class Program
     {
-        public const string SelfTestEventName = "Local\\SurfaceBacklightKeeper.SelfTest";
+        public const string SelfTestEventName = "Local\\OrclSKBK.SelfTest";
 
         [STAThread]
         static void Main(string[] args)
@@ -1175,7 +1206,7 @@ namespace SurfaceBacklightKeeper
             if (args.Length > 0 && (args[0] == "--test" || args[0] == "/test")) { RunSelfTest(); return; }
 
             bool created;
-            using (var mutex = new Mutex(true, "Local\\SurfaceBacklightKeeper.SingleInstance", out created))
+            using (var mutex = new Mutex(true, "Local\\OrclSKBK.SingleInstance", out created))
             {
                 if (!created) return;
                 try { Application.Run(new KeeperForm()); }
@@ -1190,7 +1221,7 @@ namespace SurfaceBacklightKeeper
             var devices = BacklightDevice.FindAll(delegate(string s) { sb.AppendLine(s); });
             if (devices.Count == 0)
             {
-                MessageBox.Show("No HID keyboard-backlight collection was found on this PC.\r\n\r\n" + sb, "Surface Keyboard Backlight Keeper - self test", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("No HID keyboard-backlight collection was found on this PC.\r\n\r\n" + sb, AppInfo.DisplayName + " - self test", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             var d = devices[0];
@@ -1222,7 +1253,7 @@ namespace SurfaceBacklightKeeper
                 "Levels reported by the keyboard: " + string.Join(", ", Array.ConvertAll(d.Suggestions, delegate(int x) { return x.ToString(); })) + " nits\r\n\r\n" +
                 log + "\r\n" + (failures == 0 ? "If you saw the keyboard light step up and back down, the app can control the backlight.\r\n(The light must already be on: touch the trackpad, then run the test.)" : failures + " write(s) failed.") +
                 (restore.HasValue && restore.Value > 0 ? "\r\nRestored Windows' level: " + restore.Value + " nits." : ""),
-                "Surface Keyboard Backlight Keeper - self test", MessageBoxButtons.OK, failures == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                AppInfo.DisplayName + " - self test", MessageBoxButtons.OK, failures == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
     }
 }

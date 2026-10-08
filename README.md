@@ -1,4 +1,6 @@
-# Surface Keyboard Backlight Keeper
+# OrclSKBK
+
+**Oracooll Surface Keyboard Backlight Keeper** - current version **1.3.001**
 
 A tiny Windows tray app that stops the Surface keyboard backlight from switching itself off after
 about 30 seconds without typing. Touch the trackpad once, and the light stays on for as long as you
@@ -14,10 +16,10 @@ issues.
 
 ## Install
 
-1. Download the latest zip from [Releases](https://github.com/Oracooll/SurfaceKeyboardBacklightKeeper/releases)
+1. Download `OrclSKBK.exe` or the latest zip from [Releases](https://github.com/Oracooll/OrclSKBK/releases)
    and unpack it.
-2. Either just run `SurfaceKeyboardBacklightKeeper.exe`, or run `install.ps1` (right-click,
-   *Run with PowerShell*) to copy it to `%LOCALAPPDATA%\SurfaceKeyboardBacklightKeeper`, start
+2. Either just run `OrclSKBK.exe`, or run `install.ps1` (right-click,
+   *Run with PowerShell*) to copy it to `%LOCALAPPDATA%\OrclSKBK`, start
    it at sign-in and add a Start menu shortcut. `uninstall.ps1` reverses that. It deletes only
    what the app creates, keeps folders that contain anything else, and lists whatever it could
    not remove.
@@ -28,6 +30,12 @@ The binary is not code-signed, so Windows SmartScreen warns on first run. Choose
 single source file with the C# compiler that ships in every Windows installation. No Visual Studio
 or .NET SDK required. The release notes carry the SHA-256 of each zip.
 
+## Upgrading from 1.2.0 or earlier
+
+Versions up to 1.2.0 were called *Surface Keyboard Backlight Keeper*. OrclSKBK copies their
+settings on first start. Running install.ps1 also stops the old version and removes its startup
+entry, Start menu shortcut and installed exe. uninstall.ps1 removes both names.
+
 ## Privacy, permissions and files
 
 It needs no admin rights and no driver, makes no network connections, and does not read
@@ -36,9 +44,9 @@ collection. Everything it writes is per-user:
 
 | Where | What | When |
 | --- | --- | --- |
-| `HKCU\Software\SurfaceBacklightKeeper` | Settings | When you change a menu option, and on first run |
-| `HKCU\...\CurrentVersion\Run`, value `SurfaceBacklightKeeper` | Start at sign-in | Only when *Start with Windows* is ticked or `install.ps1` runs |
-| `%LOCALAPPDATA%\SurfaceBacklightKeeper\keeper.log` | Log: start-up, device path and IDs, brightness sent, errors | Only while *Write log file* is ticked |
+| `HKCU\Software\OrclSKBK` | Settings | When you change a menu option, and on first run |
+| `HKCU\...\CurrentVersion\Run`, value `OrclSKBK` | Start at sign-in | Only when *Start with Windows* is ticked or `install.ps1` runs |
+| `%LOCALAPPDATA%\OrclSKBK\keeper.log` | Log: start-up, device path and IDs, brightness sent, errors | Only while *Write log file* is ticked |
 | same file | Crash report (exception details) | Always, if the app crashes |
 
 The log rotates at about 512 KB and keeps one previous file (`keeper.old.log`). The app reads the
@@ -56,7 +64,7 @@ the built-in Surface keyboard.
   refresh interval, keep-alive method, pause rules, *Start with Windows*, log file, About.
 * **Double-click** the icon to toggle it on and off.
 * **Touch the trackpad or press a key** once when the light is off; the app keeps it on from there.
-* `SurfaceKeyboardBacklightKeeper.exe --test` steps the light through its levels (run it while the
+* `OrclSKBK.exe --test` steps the light through its levels (run it while the
   light is on) to prove the app can drive the backlight on your model.
 
 ## Why the backlight turns off, and why nothing in Settings fixes it
@@ -104,13 +112,17 @@ stays on.
 * **Several keyboards are tracked separately**: brightness changes, the "turned off with its key"
   state and failure counts are kept per keyboard.
 
+## Versions
+
+Versions follow the Oracooll 1.X.XXX scheme and are set in one place, `AppInfo` at the top of the source. Releases are titled "OrclSKBK 1.X.XXX" and tagged `v1.X.XXX`.
+
 ## Files
 
 | Path | What |
 | --- | --- |
-| `src\SurfaceBacklightKeeper.cs` | Complete source. C# 5 on purpose so the in-box compiler builds it. |
+| `src\OrclSKBK.cs` | Complete source. C# 5 on purpose so the in-box compiler builds it. |
 | `src\app.manifest` | Runs as invoker, per-monitor DPI aware. |
-| `build.ps1` | Builds `build\SurfaceKeyboardBacklightKeeper.exe` with `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`. |
+| `build.ps1` | Builds `build\OrclSKBK.exe` with `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe`. |
 | `install.ps1`, `uninstall.ps1` | Per-user install to Local AppData with start-at-sign-in, and removal. |
 | `release.ps1` | Builds, zips, hashes and publishes a GitHub release (maintainer use). |
 | `.github/workflows/build.yml` | CI build on every push. |

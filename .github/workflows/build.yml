@@ -16,5 +16,5 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SurfaceKeyboardBacklightKeeper
-          path: build/SurfaceKeyboardBacklightKeeper.exe
+          name: OrclSKBK
+          path: build/OrclSKBK.exe
