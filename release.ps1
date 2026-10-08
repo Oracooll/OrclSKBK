@@ -40,3 +40,10 @@ Made by Claude, prompted by Oracooll. Unsigned binary: Windows SmartScreen will 
 "@
 gh release create $tag $exe $zip $hashFile --title "OrclSKBK $version" --notes $body
 Write-Host "Published OrclSKBK $version ($tag)"
+
+# Local layout: the repo lives in <app folder>\OrclSKBK-src and the released exe sits in <app folder> itself.
+$appFolder = Split-Path -Parent $root
+if ((Split-Path -Leaf $root) -eq 'OrclSKBK-src') {
+    try { Copy-Item -LiteralPath $exe -Destination (Join-Path $appFolder 'OrclSKBK.exe') -Force; Write-Host "Copied the released exe to $appFolder" }
+    catch { Write-Warning "Could not copy the released exe to ${appFolder}: $($_.Exception.Message) (close OrclSKBK if it runs from there)." }
+}
